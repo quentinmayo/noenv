@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+
+# NoEnv local state (never commit)
+.noenv/
+*.noenv.secret
+
+# environment files (NoEnv's whole point: don't commit these)
+.env
+.env.*
+!.env.example
+
+# logs / os
+*.log
+.DS_Store
+Thumbs.db
