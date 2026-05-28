@@ -1,119 +1,192 @@
-# NoEnv
+<div align="center">
 
-**Run commands with secrets, without committing secrets.**
+<img src="docs/assets/banner.svg" alt="NoEnv — run commands with secrets, without committing secrets" width="100%" />
 
-NoEnv resolves your environment variables at runtime and injects them only into
-the command you run — so you never commit a `.env` file or leave plaintext
-secrets sitting in your repo.
+<p>
+  <img src="https://img.shields.io/badge/status-v0.1%20MVP-7c3aed" alt="status: v0.1 MVP" />
+  <img src="https://img.shields.io/badge/node-%E2%89%A5%2022-339933?logo=node.js&logoColor=white" alt="node >= 22" />
+  <img src="https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white" alt="TypeScript strict" />
+  <img src="https://img.shields.io/badge/tests-24%20passing-2ea44f" alt="tests: 24 passing" />
+  <img src="https://img.shields.io/badge/runtime%20deps-~0-success" alt="runtime deps: ~0" />
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="license: MIT" />
+</p>
 
-```bash
-npm install -g @noenv/cli
-noenv init
-noenv set DATABASE_URL
-noenv set OPENAI_API_KEY
-noenv -- npm run dev
-```
+<strong>No committed secrets. &nbsp;·&nbsp; No plaintext <code>.env</code> files. &nbsp;·&nbsp; No copying tokens out of Slack.</strong>
 
-No committed secrets. No plaintext `.env` files. No copying tokens out of Slack.
+<p>
+  <a href="#-quickstart">Quickstart</a> &nbsp;·&nbsp;
+  <a href="#-why">Why</a> &nbsp;·&nbsp;
+  <a href="#-what-it-protects">What it protects</a> &nbsp;·&nbsp;
+  <a href="#-commands">Commands</a> &nbsp;·&nbsp;
+  <a href="#%EF%B8%8F-modes">Modes</a> &nbsp;·&nbsp;
+  <a href="#%EF%B8%8F-configuration">Config</a> &nbsp;·&nbsp;
+  <a href="#-roadmap">Roadmap</a>
+</p>
 
-> **v0.1 — local-first.** This is the MVP slice: a local, encrypted, per-user
-> store with runtime injection. Team/server, remote providers, and schema docs
-> are on the roadmap (see [`docs/PRD.md`](docs/PRD.md)).
+</div>
 
 ---
 
-## What it does
+**NoEnv** resolves your environment variables at runtime and injects them *only*
+into the command you run. Secrets live encrypted in a per-user store outside your
+repo and are decrypted in memory at launch — so there's no `.env` file to
+accidentally commit, paste into chat, or leave behind on disk.
 
-When you prefix a command with `noenv`, it:
+```bash
+noenv -- npm run dev
+```
 
-1. builds a **context** (project, mode, git, machine);
-2. resolves the env payload for that project + mode from a configured provider;
-3. spawns your command with those variables injected into its environment;
-4. preserves the child's exit code and streams its stdio.
+> [!NOTE]
+> **v0.1 is local-first** — an encrypted local store with runtime injection. The
+> team/server, remote providers, and schema docs are on the [roadmap](#-roadmap).
+> Design rationale lives in [`docs/PRD.md`](docs/PRD.md) and the
+> [ADRs](docs/adr/).
 
-Secrets live encrypted in a per-user store outside your repo, decrypted only in
-memory at launch.
+---
 
-## What it protects (and what it doesn't)
+## ⚡ Quickstart
 
-NoEnv is honest about its threat coverage:
+```bash
+npm install -g @noenv/cli
+
+noenv init                  # set up NoEnv in this project (and your machine, once)
+noenv set DATABASE_URL      # prompts for the value — never echoed, never on the CLI
+noenv set OPENAI_API_KEY
+noenv -- npm run dev        # resolve, inject, run
+```
+
+Already have a `.env`? Migrate it in one step:
+
+```bash
+noenv import .env           # encrypt into the store + add .env to .gitignore
+rm .env                     # delete the plaintext copy
+```
+
+---
+
+## 🤔 Why
+
+`.env` files were a useful convention, but they were never a security boundary.
+
+<table>
+<tr><th>The old way</th><th>With NoEnv</th></tr>
+<tr><td>
+
+```bash
+# .env (one git add away from a leak)
+DATABASE_URL=postgres://…
+OPENAI_API_KEY=sk-live-…
+
+$ npm run dev
+```
+
+</td><td>
+
+```bash
+# nothing secret in the repo
+# values resolved at launch, in memory
+
+$ noenv -- npm run dev
+```
+
+</td></tr>
+</table>
+
+---
+
+## 🧊 What it protects
+
+NoEnv is honest about its threat coverage — overstating it is how security tools lose trust.
 
 | Threat | Covered? |
-|---|---|
-| Accidental `git commit` of secrets | ✅ yes — nothing secret is in the repo |
-| Secrets pasted into chat / shell history | ✅ yes — values are prompted, never on the command line |
-| Plaintext `.env` at rest in the repo | ✅ yes — replaced by an encrypted store |
+| --- | --- |
+| Accidental `git commit` of secrets | ✅ nothing secret is in the repo |
+| Secrets pasted into chat / shell history | ✅ values are prompted, never on the command line |
+| Plaintext `.env` at rest in the repo | ✅ replaced by an encrypted store |
 | Laptop theft → secret compromise | ⚠️ partial — local mode ≈ OS-keychain strength |
-| Secret readable in a running process | ❌ no — env vars are visible via `/proc`, `ps e`, crash dumps, child processes |
-| Live rotation into a running process | ❌ no — rotation applies on the **next run** (env vars are immutable for a process's life) |
+| Secret readable in a *running* process | ❌ env vars are visible via `/proc`, `ps e`, crash dumps, child processes |
+| Live rotation into a *running* process | ❌ rotation applies on the **next run** (env vars are immutable for a process's life) |
 
-> Local mode trades "plaintext in the repo" for "encrypted outside the repo, key
-> in the OS keychain." Better — not a secret boundary against a local attacker.
+> **In one line:** local mode trades *"plaintext in the repo"* for *"encrypted
+> outside the repo, key in the OS keychain."* Better — not a secret boundary
+> against a local attacker.
 
-## Key custody
+---
+
+## 🔐 Key custody
 
 The 32-byte master key is held by one of two providers, chosen at `init`:
 
-- **keychain** (default when available) — the master key lives in the OS keychain
-  (macOS Keychain, Windows Credential Manager, libsecret) via a prebuilt native
-  module. Seamless, no passphrase prompts.
-- **passphrase** (fallback) — the key is derived (scrypt) from a passphrase plus
-  a stored salt. Set `NOENV_PASSPHRASE` for non-interactive use, or you'll be
+- **🔑 keychain** *(default when available)* — the master key lives in the OS
+  keychain (macOS Keychain, Windows Credential Manager, libsecret) via a prebuilt
+  native module. Seamless, no passphrase prompts.
+- **🔒 passphrase** *(fallback)* — the key is derived (scrypt) from a passphrase
+  plus a stored salt. Set `NOENV_PASSPHRASE` for non-interactive use, or you'll be
   prompted.
 
-Secrets are encrypted with AES-256-GCM. The key is never written to disk in
-plaintext. Each stored row records `enc_key_id` and `enc_alg` so the master key
+Secrets are encrypted with **AES-256-GCM**. The key is never written to disk in
+plaintext, and each stored row records `enc_key_id` / `enc_alg` so the master key
 can be rotated later.
 
-## Commands
+---
+
+## 🧰 Commands
+
+| | |
+| --- | --- |
+| `noenv -- <cmd>` | Resolve env vars and run a command |
+| `noenv --mode staging -- npm test` | Run with an explicit mode |
+| `noenv --dry-run -- npm run dev` | Show the plan, run nothing |
+| `noenv init` | Set up NoEnv in this project |
+| `noenv set <KEY>` | Store a secret (prompted if no `--value`) |
+| `noenv get <KEY> [--redact]` | Read one secret |
+| `noenv list` | List keys — never values |
+| `noenv remove <KEY>` | Delete a secret |
+| `noenv import .env` | Migrate an existing `.env` |
+| `noenv context` | Show context + resolved mode |
+| `noenv doctor` | Diagnose your setup |
+
+<details>
+<summary><strong>More: schema, export & context rules</strong></summary>
 
 ```bash
-# setup
-noenv init                                 # set up NoEnv in this project
-noenv doctor                               # diagnose your setup
-
-# run
-noenv -- npm run dev                       # resolve + inject, then run
-noenv --mode staging -- npm test           # explicit mode
-noenv --dry-run -- npm run dev             # show the plan, run nothing
-
-# secrets
-noenv set DATABASE_URL [--mode m] [--value v] [--plain]
-noenv get DATABASE_URL [--mode m] [--redact]
-noenv list [--mode m]                      # keys only, never values
-noenv remove DATABASE_URL [--mode m] [--yes]
-noenv import .env [--mode m]               # migrate an existing .env
-
-# context
-noenv context [detect]                     # show context + resolved mode
-noenv context add-network home 192.168.1.0/24 --mode home
-noenv context add-git github.com/acme/api --project api
-
-# schema (optional)
+# optional schema (documentation + validation)
 noenv schema init | validate | generate-env | docs
 
 # legacy-tool bridge
 noenv export [--format dotenv|json|shell] [--redact]
-noenv export --temporary -- npm run legacy-dev   # temp .env, run, delete
+noenv export --temporary -- npm run legacy-dev    # temp .env, run, then delete
+
+# opt-in context rules
+noenv context add-network home 192.168.1.0/24 --mode home
+noenv context add-git github.com/acme/api --project api
 ```
 
-## Modes
+</details>
 
-A *mode* selects which set of values to load (`local`, `dev`, `staging`, ...).
+---
+
+## 🎚️ Modes
+
+A *mode* selects which set of values to load (`local`, `dev`, `staging`, …).
 Resolution is **explicit by default** — auto-selecting secrets from ambient
 signals is a footgun. Precedence (first match wins):
 
-1. `--mode` flag
-2. `NOENV_MODE` env
-3. branch rule *(opt-in, disabled by default)*
-4. network/CIDR rule *(opt-in, disabled by default)*
-5. project default (`noenv.config.json`)
-6. global default (fallback: `local`)
+```
+1. --mode flag          ← always wins
+2. NOENV_MODE env
+3. branch rule          (opt-in, off by default)
+4. network/CIDR rule    (opt-in, off by default)
+5. project default      (noenv.config.json)
+6. global default       (fallback: "local")
+```
 
 If opt-in branch and network rules disagree and there's no explicit flag, NoEnv
 **refuses to guess** and asks you to pass `--mode`.
 
-## Configuration
+---
+
+## ⚙️ Configuration
 
 `noenv.config.json` is committed and contains **no secrets** — just the project
 name, default mode, providers, and (opt-in) context rules:
@@ -133,31 +206,44 @@ name, default mode, providers, and (opt-in) context rules:
 
 Running a `sensitiveModes` entry prompts for confirmation (skipped in CI).
 
-## Migrating from `.env`
+---
 
-```bash
-noenv import .env          # encrypt into the store + gitignore the file
-rm .env                    # delete the plaintext copy
-# if .env was ever committed: git rm --cached .env, rotate the secrets,
-# and scrub history (e.g. git filter-repo)
-```
-
-## Development
+## 🛠️ Development
 
 ```bash
 npm install          # installs the prebuilt @napi-rs/keyring (optional)
 npm run build        # tsc -> dist/
-npm test             # build + node:test suite
+npm test             # build + node:test suite (24 tests)
 npm run typecheck    # tsc --noEmit
 ```
 
-Near-zero runtime dependencies by design (smaller supply chain): the store uses
-the built-in `node:sqlite`, crypto uses `node:crypto`, and the only optional
-dependency is the OS-keychain binding. Requires **Node >= 22** (developed on 24).
+**Near-zero runtime dependencies by design** (smaller supply chain): the store
+uses the built-in `node:sqlite`, crypto uses `node:crypto`, tests use `node:test`.
+The only optional dependency is the OS-keychain binding. Requires **Node ≥ 22**
+(developed on 24).
 
-See [`docs/PRD.md`](docs/PRD.md) and the ADRs in [`docs/adr/`](docs/adr/) for the
-design rationale.
+---
 
-## License
+## 🗺️ Roadmap
 
-MIT
+<details open>
+<summary><strong>Where this is headed</strong></summary>
+
+| Stage | Highlights |
+| --- | --- |
+| **v0.1** *(here)* | Local encrypted store · runtime injection · explicit modes · import/export · schema · doctor |
+| **V1** | Broker server · `login` + RBAC · remote providers (AWS Secrets Manager, 1Password, Vault) · audit logs · opt-in branch/network rules |
+| **V1.5+** | Web UI · approval flows · GitHub Actions / Docker integrations · optional daemon for live rotation |
+
+Remote providers slot into the existing `SecretProvider` interface without
+touching the CLI. See [ADR-0001](docs/adr/0001-storage-model-broker-vs-store.md)
+and [ADR-0002](docs/adr/0002-delivery-model-launch-time-vs-daemon.md).
+
+</details>
+
+---
+
+<div align="center">
+<sub>The safest <code>.env</code> file is the one you never had to create.</sub><br/>
+<sub>MIT licensed.</sub>
+</div>
