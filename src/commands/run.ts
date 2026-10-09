@@ -1,3 +1,4 @@
+import { applicationEnvironment } from "../util/environment.js";
 import type { ParsedCommand } from "../cli/parse.js";
 import { log } from "../cli/output.js";
 import { strOpt, boolOpt } from "../cli/opts.js";
@@ -16,8 +17,8 @@ export async function run(p: ParsedCommand): Promise<number> {
     return 1;
   }
 
-  const global = requireGlobal();
   const config = loadProjectConfig()?.config ?? null;
+  const global = requireGlobal(config);
   const context = buildContext();
 
   const resolution = resolveMode({ flag: strOpt(p, "mode"), config, global, context });
@@ -65,7 +66,7 @@ export async function run(p: ParsedCommand): Promise<number> {
       }
     }
 
-    const env: NodeJS.ProcessEnv = { ...process.env };
+    const env = applicationEnvironment();
     for (const sv of map.values()) env[sv.key] = sv.value;
 
     log.info(`Running: ${child.join(" ")}`);

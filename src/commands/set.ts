@@ -13,21 +13,21 @@ export async function run(p: ParsedCommand): Promise<number> {
     return 1;
   }
 
-  const global = requireGlobal();
   const config = loadProjectConfig()?.config ?? null;
+  const global = requireGlobal(config);
   const context = buildContext();
   const project = resolveProjectName({ flag: strOpt(p, "project"), config, context });
   const mode = strOpt(p, "mode") ?? config?.defaultMode ?? "local";
 
-  const value = strOpt(p, "value") ?? (await password(`Value for ${key} (${project}/${mode}): `));
-  if (!value) {
-    log.error("No value provided.");
-    return 1;
-  }
-
   const providers = await buildProviders(config, global);
   try {
-    await firstWritable(providers).set({
+    const writer = firstWritable(providers);
+    const value = strOpt(p, "value") ?? (await password(`Value for ${key} (${project}/${mode}): `));
+    if (!value) {
+      log.error("No value provided.");
+      return 1;
+    }
+    await writer.set({
       project,
       key,
       mode,

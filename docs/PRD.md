@@ -1,520 +1,208 @@
-# Product Requirements Document: NoEnv
+# NoEnv product requirements and implementation status
 
-> **Status:** Draft v0.2 (revised) · **Owner:** Quentin Mayo · **Last updated:** 2026-05-27
->
-> This revision incorporates a design critique of the v0.1 draft. The headline
-> changes: an honest security framing of what local mode does and does not
-> protect, a launch-time resolution model (not live rotation), explicit `--mode`
-> as the default resolution mechanism, a broker-first server, and a deliberately
-> small MVP behind a flexible, option-rich architecture. Two load-bearing
-> decisions are recorded as ADRs:
->
-> - [ADR-0001 — Storage model: broker vs. store](./adr/0001-storage-model-broker-vs-store.md)
-> - [ADR-0002 — Delivery model: launch-time vs. daemon](./adr/0002-delivery-model-launch-time-vs-daemon.md)
+**Revision:** 2026-10-09 · **Current package:** v0.1.0
 
----
+This document separates the implemented local/Knox CLI from proposed team features.
+For executable workflows, use the [README](../README.md), [usage guide](usage.md),
+and [configuration reference](configuration.md).
 
 ## 1. Product
 
-**NoEnv** — a developer tool that resolves and injects environment variables at
-command runtime so developers never have to commit `.env` files or keep
-plaintext secret files in their repos.
+**NoEnv** resolves values at command launch and injects them into the child
+process's environment. Its purpose is to reduce plaintext `.env` files and
+accidental secret commits while preserving ordinary application configuration.
 
-**Tagline:** *Run commands with secrets, without committing secrets.*
+**Tagline:** Run commands with secrets, without committing secrets.
 
-**Brand / packaging**
+The package is `@noenv/cli`, the command is `noenv`, and the current source tree
+is a single TypeScript package. Installation from source is documented; the
+package name alone is not a claim that an npm release has been published.
 
-- Product name: **NoEnv**
-- CLI binary: `noenv`
-- npm package: `@noenv/cli`
-- No public codename. ("Snow" is generic, unsearchable, and squat-prone — drop it.)
+## 2. Current implementation
 
----
+| Area | Implemented behavior |
+| --- | --- |
+| Storage | Encrypted local SQLite or read-only Knox, scoped by project/mode/key |
+| Key custody | OS keychain binding or scrypt-derived passphrase key |
+| Delivery | Resolve, merge over inherited env, launch child, inherit stdio and normal exit code |
+| Secrets | `set`, `get`, `list`, `remove`/`rm`, dotenv import |
+| Export | dotenv/JSON/shell stdout; temporary `.env` bridge |
+| Context | Git/project detection, explicit modes, opt-in branch and IPv4 network rules |
+| Schemas | Required-key/numeric checks, placeholders/default output, Markdown table |
+| Diagnostics | `context`, `doctor`, verbose resolution, dry-run launch plans |
+| Audit | Local SQLite rows for reads/resolution/writes/removals |
 
-## 2. Executive Summary
+**Not implemented:** Other remote providers, server, login/logout,
+RBAC, remote-only production policy, central audit, a dynamic provider plugin
+loader, automatic schema checks during launch, or live rotation.
+`login`, `logout`, and `server` are recognized stubs; `link` is absent.
 
-```bash
-noenv -- npm run dev
-noenv --mode staging -- npm run test:e2e
-noenv -- docker compose up
-```
+## 3. Target users and scope
 
-When a developer prefixes a command with `noenv`, the tool builds a **context**
-(project, mode, git, machine), resolves the right environment payload from a
-configured **provider**, and spawns the target command with those variables in
-its child environment. The values are never written to the repo and, by default,
-never written to disk.
+- Individual developers: encrypted local values, explicit environment selection,
+  migration from dotenv, and ordinary command execution.
+- Engineering teams: planned shared references, authenticated remote resolution,
+  easier onboarding, and centralized access controls.
+- Platform/security teams: planned provider integration, scoped CI access,
+  central audit, and enforceable deployment policy.
 
-NoEnv is **provider-pluggable**: a local encrypted SQLite store for solo use, a
-NoEnv broker server for teams, or external managers (AWS Secrets Manager, SSM,
-1Password, Bitwarden, Vault, Doppler, Infisical, GCP/Azure, Knox-compatible).
-Schemas are an **optional** power feature for documentation and validation — not
-the foundation.
+The local MVP does not synchronize secrets across machines. Remote resolution
+would remove the need to copy a local database, while still delivering plaintext
+values to authorized client processes.
 
----
+## 4. Principles
 
-## 3. What NoEnv actually protects (read this first)
+1. Keep real values out of committed configuration and schemas.
+2. Preserve command-first use: applications read their normal environment.
+3. Keep local use possible without server infrastructure.
+4. Make source, project, and mode inspectable without printing secret values.
+5. Describe implemented protections separately from intended policy.
+6. Keep schema checks optional and explicitly invoked.
 
-NoEnv is precise about its threat coverage. Overstating it is how security tools
-lose trust.
-
-| Threat | Covered? | Notes |
-|---|---|---|
-| Accidental `git commit` of secrets | ✅ Yes | Nothing secret lives in the repo. This is the core win. |
-| Secrets pasted into Slack / chat | ✅ Yes (workflow) | `import` + provider resolution removes the reason to copy values around. |
-| Secrets in shell history | ✅ Yes | `noenv set` prompts; values never appear on the command line by default. |
-| Plaintext `.env` at rest in the repo | ✅ Yes | Replaced by an encrypted store outside the repo, or by a remote provider. |
-| Laptop theft → secret compromise | ⚠️ Partial | Local mode ≈ OS-keychain strength. **Prod secrets are never stored locally.** |
-| Secret readable in a running process | ❌ No | Env vars are visible via `/proc/<pid>/environ`, `ps e`, crash dumps, error reporters, and inherited by child processes. |
-| Live rotation into a running process | ❌ No (by design) | Env vars are immutable for a process's life. Rotation applies on the **next run**. See ADR-0002. |
-
-**Honest one-liner for the README:** *local mode trades "plaintext in the repo"
-for "encrypted outside the repo, key in the OS keychain." Better — not a secret
-boundary against a local attacker.*
-
----
-
-## 4. Problem Statement
-
-Teams run apps locally, in CI, and across environments using a sprawl of
-`.env`, `.env.local`, `.env.dev`, `.env.production`, `.env.example` files. This
-is convenient but causes:
-
-1. **Accidental commits** of API keys, DB passwords, tokens, cloud creds.
-2. **`.env.example` drift** — example files go stale and mislead.
-3. **Manual onboarding** — new engineers beg teammates for values via Slack.
-4. **Hard-to-reason-about environments** — local/dev/staging/prod/preview/CI all differ slightly.
-5. **Plaintext sprawl across machines** — laptops, old projects, screenshots, backups.
-6. **Point solutions** — managers store, schema tools validate, runtime tools inject; nothing connects the workflow.
-
-> **Scope honesty:** problems 1–4 are solved by the MVP. Problem 5
-> (cross-machine duplication) is **only** solved by the server / remote-provider
-> path (V1), because a per-laptop encrypted store does not sync. The MVP does not
-> claim to fix #5.
-
----
-
-## 5. Product Principles
-
-1. **No committed secrets.** Secrets never need to live in source control.
-2. **Command-first.** Wrap a command; never change app code.
-3. **Local-first, server-optional.** Solo devs get value with zero infrastructure.
-4. **Opinionated defaults, flexible options.** Safe defaults out of the box;
-   every meaningful choice (provider, resolution strategy, storage model) is
-   configurable. NoEnv supports many ways to work without forcing one.
-5. **Verbose and inspectable.** The tool can always explain *what it resolved,
-   from which provider, under which mode, and why* — via `--dry-run`,
-   `--verbose`, and `noenv context`. No silent magic.
-6. **Honest security.** Document exactly what is and isn't protected (§3).
-7. **Schemas help, never gate.** Validation/docs are optional power features.
-
----
-
-## 6. Resolution model (the core mechanic)
-
-NoEnv resolves a payload in four stages. Every stage is observable with
-`--dry-run`.
-
-```
-context  ──▶  mode  ──▶  provider chain  ──▶  child process env
- (who/where)  (which set)  (where values live)   (spawn, preserve exit code)
-```
-
-### 6.1 Mode resolution — explicit by default
-
-Auto-selecting *which secrets to load* from ambient signals (WiFi, branch) is a
-footgun: guess wrong and you load prod creds into a dev command. So:
-
-- **MVP:** mode comes from `--mode` (or `NOENV_MODE`), else the project default.
-  That's it.
-- **Opt-in (V1):** branch rules and network/CIDR rules, **off by default**, and
-  when on they **always print the resolved mode** and **require confirmation for
-  any mode tagged `sensitive`**.
-
-Documented precedence (first match wins), shown by `noenv context`:
-
-1. `--mode` flag
-2. `NOENV_MODE` env override
-3. branch rule *(opt-in)*
-4. network/CIDR rule *(opt-in)*
-5. project default
-6. global default
-
-When two opt-in rules match different modes, NoEnv refuses to guess: it prints
-both matches and exits non-zero unless `--mode` disambiguates.
-
-### 6.2 Provider chain — pluggable, ordered, observable
-
-Providers are tried in configured order; first hit wins. A resolution log
-(redacted) records key → provider for every variable. Built-ins ship first;
-external/third-party providers are gated (see §10 security).
-
-```ts
-interface SecretProvider {
-  name: string;
-  getSecret(input: {
-    project: string; key: string; mode?: string; context: NoEnvContext;
-  }): Promise<SecretValue | null>;
-  listSecrets?(input: {
-    project: string; mode?: string; context: NoEnvContext;
-  }): Promise<SecretMetadata[]>;
-}
-```
-
-### 6.3 Delivery — launch-time injection
-
-NoEnv resolves at spawn, injects into the child's environment, preserves exit
-code, and streams stdio. It does **not** run a daemon and does **not** push
-rotations into live processes (ADR-0002). Rotation = "next run gets the new
-value." A daemon/file-watch mode is a documented future option, not v1.
-
----
-
-## 7. Context object
-
-Built before resolution; printable via `noenv context`.
-
-```json
-{
-  "cwd": "/Users/quentin/projects/my-api",
-  "hostname": "quentin-macbook",
-  "username": "quentin",
-  "git": { "remote": "github.com/quentinmayo/my-api", "branch": "main", "sha": "abc123" },
-  "network": { "ip": "192.168.1.25", "cidrMatch": "home" },
-  "mode": "local",
-  "ci": false
-}
-```
-
-Inputs: cwd, git remote/branch/root, hostname, username, IP, CIDR profile,
-explicit mode, CI metadata, pre-existing env. Network/git fields are *collected*
-in MVP for display but only *drive resolution* when opt-in rules are enabled.
-
----
-
-## 8. Target Users
-
-- **Individual developer** — local, low-ceremony, encrypted store, `.env` import, temp-export bridge for legacy tools.
-- **Engineering team** — shared definitions, team backend (broker), RBAC, audit, repo-aware resolution, fast onboarding.
-- **Security engineer** — no committed plaintext, access logs, git-aware policy, no prod secrets on laptops, plays nice with secret scanners.
-- **Platform engineer** — CLI automation, CI tokens, plugin system, multi-environment, works with existing tools.
-
----
-
-## 9. Configuration & Schema
-
-### 9.1 `noenv.config.json` (committed, no secrets)
-
-Safe to commit — references and rules only, never values.
-
-```json
-{
-  "project": "my-api",
-  "defaultMode": "local",
-  "providers": [
-    { "name": "local", "type": "sqlite", "path": "~/.noenv/noenv.db" }
-  ],
-  "rules": {
-    "git": [{ "remote": "github.com/quentinmayo/my-api", "project": "my-api" }],
-    "network": [
-      { "name": "home", "cidr": "192.168.1.0/24", "mode": "home", "enabled": false }
-    ]
-  }
-}
-```
-
-### 9.2 Committed secret *references* (not ciphertext)
-
-NoEnv may commit pointers — `provider + path + version` — never encrypted secret
-bytes. References are safe and power team onboarding ("link the repo, resolve
-from the broker").
-
-### 9.3 Optional schema (`noenv.schema.json`, post-MVP)
-
-JSON Schema-compatible. Documents required/optional vars, marks secrets,
-validates resolved values, generates placeholder `.env` and docs. TypeScript-type
-and rich-docs generation are explicitly *not* an early investment — that overlaps
-Varlock's lane.
-
-```json
-{
-  "variables": {
-    "DATABASE_URL": { "type": "string", "required": true, "secret": true, "description": "Primary DB connection string" },
-    "APP_PORT":     { "type": "number", "required": false, "default": 3000 }
-  }
-}
-```
-
----
-
-## 10. Security Requirements
-
-### 10.1 Secrets at rest (local)
-
-- Values are **envelope-encrypted**; the data key is wrapped by a master key held
-  in the **OS keychain** (macOS Keychain, Windows Credential Manager, libsecret),
-  with a passphrase-derived fallback. This replaces the v0.1 "encryption
-  placeholder" — it is a launch blocker, not a later task.
-- Every encrypted row stores envelope metadata (`enc_key_id`, `enc_alg`) so the
-  master key can rotate and schemes can evolve.
-- **Prod secrets are never stored in the local provider.** Prod is always
-  brokered from a remote provider with audit (ADR-0001). Laptop theft must not
-  equal prod compromise.
-
-### 10.2 Secrets at runtime — what we can't fix
-
-Document plainly (§3): once injected, env vars are visible to the process, its
-children, `/proc`, `ps e`, crash dumps, and error reporters. NoEnv reduces
-file/commit exposure, not runtime exposure.
-
-### 10.3 Logging & redaction
-
-Never log values, full connection strings, tokens, auth headers, passwords, or
-private keys. May log: key names, project, mode, provider, redacted markers,
-timestamps.
+## 5. Resolution and delivery
 
 ```text
-Resolved DATABASE_URL from local-sqlite [redacted]
-Resolved OPENAI_API_KEY from 1password   [redacted]
-Running: npm run dev
+context -> project + mode -> provider results -> child environment
 ```
 
-### 10.4 Plugin trust
+Project precedence is flag, matching Git rule, project config, Git repository
+name, then cwd basename. For `run` and `context`, mode precedence is flag,
+`NOENV_MODE`, enabled branch rule, enabled network rule, project default, global
+default, then `local`. Conflicting branch/network modes without an explicit
+flag/environment override prevent launch.
 
-"Plugin-friendly" and "secure by design" are in tension: any provider reads every
-secret and makes network calls — an exfiltration vector by design. v1 policy:
-**first-party / signed providers only**, with a declared-permissions model on the
-roadmap before opening third-party plugins. Don't market open plugins until this
-ships.
+Other secret commands currently use only flag, project default, then `local`.
+Unifying those paths is follow-up work. Network/Git signals are convenience
+inputs, not proof of identity or access rights.
 
-### 10.5 Safe defaults
+`get` queries in provider order. Bulk resolution queries every provider and
+merges results with the first provider winning duplicate keys. Writes select
+the first writable provider. The actual contract is
+[`SecretProvider`](../src/providers/types.ts): `getSecret`, `resolveAll`, `list`,
+`set`, `remove`, `close`, plus `name` and `writable`.
 
-Redacted output; no plaintext export without an explicit flag + auto-gitignore +
-auto-cleanup; local-only secrets unless configured; no prod mode without explicit
-opt-in; confirmation prompts for sensitive modes; `--dry-run` everywhere.
+SQLite and Knox are constructed today. Knox-only configurations need no local
+key custody; other providers still need factory/configuration integration.
 
-### 10.6 Threat model
+Launch-time injection remains the default. External rotation affects the next
+launch, not the environment of an already running child. Future file delivery
+would require application reload behavior; it cannot automatically update an
+application that reads only its startup environment. See
+[ADR-0002](adr/0002-delivery-model-launch-time-vs-daemon.md).
 
-Accidental commits · shell-history leaks · log leaks · chat-copy leaks · temp-file
-leaks · wrong-project loads · prod-on-unsafe-machine · malicious plugin exfil ·
-compromised local store · over-broad CI tokens.
+## 6. Configuration and schema
 
----
+Committed `noenv.config.json` contains project, default mode, provider settings,
+context rules, and optional `sensitiveModes`. Omit SQLite `path` for a portable
+per-user default; the current generator writes an absolute path. `~` is not
+expanded. Full fields and precedence are in [configuration](configuration.md).
 
-## 11. Core User Flows
+`noenv.schema.json` is an implemented custom `variables` format, not a complete
+JSON Schema validator. Validation currently checks required provider values and
+numeric conversion only. Defaults are used by placeholder generation, not by
+launch or validation. Schema lookup uses cwd, unlike project config lookup.
 
-### 11.1 First-time local setup
-```bash
-npm install -g @noenv/cli
-noenv init                      # pick provider (Local SQLite default)
-```
-Creates `.noenv/config.json` + `~/.noenv/noenv.db`; appends `.noenv/`,
-`*.noenv.secret`, `.env*` to `.gitignore`.
+Future schema work may include more types, safe diagnostics, and opt-in launch
+validation. Avoid promising TypeScript generation or a JSON Schema engine until
+implemented.
 
-### 11.2 Migrate an existing `.env` (highest-leverage onboarding)
-```bash
-noenv import .env --mode local  # encrypt into store, gitignore, print git-rm + history-scrub guidance
-rm .env
-noenv -- npm run dev
-```
+## 7. Security requirements and gaps
 
-### 11.3 Add a secret (no value on the command line)
-```bash
-noenv set DATABASE_URL                          # prompts, masked
-noenv set OPENAI_API_KEY --mode local           # value still prompted
-```
+See [security and limitations](security.md) for the complete current boundary.
 
-### 11.4 Run a command
-```bash
-noenv -- npm run dev
-noenv --mode staging -- npm run test:e2e
-noenv --dry-run --mode staging -- npm run test:e2e   # show plan, run nothing
-```
+Implemented encryption uses AES-256-GCM directly with the keychain/passphrase
+master key. It stores algorithm/key identifiers but has no wrapped per-record
+data key, migration command, or master-key rotation workflow. Local audit rows
+and non-value metadata remain plaintext and are not tamper-resistant.
 
-### 11.5 Inspect resolution
-```bash
-noenv context           # context + resolved mode + precedence winner
-noenv list --mode local # keys only, redacted
-```
+The following tracks requirements, recent fixes, and remaining gaps:
 
-### 11.6 Legacy tools that demand a real file
-```bash
-noenv export --temporary -- npm run legacy-dev   # temp .env, run, auto-delete
-noenv export --format dotenv --redact            # safe-to-share placeholder
-```
+| Requirement | Current gap |
+| --- | --- |
+| Enforce remote-only production scopes | Local writes accept any mode name |
+| Avoid logging resolved values | Numeric schema errors and Knox transport errors now redact values |
+| Keep bootstrap credentials out of applications | Known NoEnv/Knox variables are filtered; custom auth variables and files remain outside this filter |
+| Consistent explicit mode handling | CRUD/export/schema differ from `run`/`context` |
+| Safe shell export | Serializer uses JSON quoting; it is not safe to evaluate arbitrary values as shell source |
+| Safe temporary-file lifecycle | Forced termination can leave plaintext; `--force` overwrites then deletes an existing file |
+| Least-privilege remote access and audit | No remote provider or policy engine exists yet |
 
-### 11.7 Team
-```bash
-noenv login https://noenv.company.com
-noenv link github.com/company/api
-noenv --mode dev -- npm run dev                  # resolved from broker, audited
-```
+`sensitiveModes` only adds a non-CI confirmation to `run`, after values are
+resolved. It does not prevent reads/writes/exports or establish access control.
+Dry runs resolve/decrypt values even though their output contains names only.
 
----
+Runtime environment exposure remains an explicit limit: applications, their
+descendants, privileged inspection, and dumps may reveal secrets. Remote storage
+does not eliminate this boundary.
 
-## 12. CLI Surface
+## 8. Knox integration
 
-```bash
-# lifecycle
-noenv init | doctor | login | logout
-# run
-noenv -- <cmd>            # primary
-noenv run -- <cmd>        # explicit alias
-noenv [--mode M] [--project P] [--dry-run] [--verbose] -- <cmd>
-# secrets
-noenv set KEY | get KEY --redact | list | remove KEY | import .env
-# context
-noenv context [detect] | context add-network <name> <cidr> | context add-git <remote> --project <p>
-# schema (post-MVP)
-noenv schema init | validate | generate-env | docs
-# export (bridge)
-noenv export --format dotenv|json|shell [--redact] [--temporary -- <cmd>]
-# server (V1)
-noenv server start | migrate | create-user | create-project
-```
+A read-only Pinterest Knox adapter is implemented. It calls a trusted native
+client with `get -n`, maps exact project/mode/variable names to key IDs, and injects
+current primary values at launch. Knox-only use does not need local key custody.
+Unknown scopes and mapped-key failures prevent launch.
 
-Bare `noenv foo` (no `--`) is an **error**, not a guess.
+Knox remains responsible for storage, access controls, and rotation. This needs
+no NoEnv server. The adapter passed live retrieval/injection/rotation/cleanup
+checks against the existing TLS-enabled LAN deployment on 2026-10-09. That
+service uses shared LAN administrator access, not individual authentication.
+See [Knox setup and verification](providers/knox.md) for details and remaining
+platform/authentication validation limits.
 
----
+## 9. Team server direction
 
-## 13. Local store schema (SQLite)
+[ADR-0001](adr/0001-storage-model-broker-vs-store.md) proposes a broker-first
+server: persist references, ACLs, and audit; resolve values from an external
+manager. An optional encrypted store may follow for teams without one.
 
-```sql
-CREATE TABLE projects (
-  id TEXT PRIMARY KEY, name TEXT NOT NULL, git_remote TEXT, created_at TEXT NOT NULL
-);
-CREATE TABLE modes (
-  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, created_at TEXT NOT NULL
-);
-CREATE TABLE secrets (
-  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, mode_id TEXT, key TEXT NOT NULL,
-  value_encrypted BLOB NOT NULL,
-  enc_key_id TEXT NOT NULL,            -- which master/data key wrapped this row
-  enc_alg TEXT NOT NULL,              -- e.g. "aes-256-gcm"
-  secret_type TEXT DEFAULT 'env',
-  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-);
-CREATE TABLE context_rules (
-  id TEXT PRIMARY KEY, project_id TEXT, rule_type TEXT NOT NULL, matcher TEXT NOT NULL,
-  mode TEXT NOT NULL, enabled INTEGER DEFAULT 0, priority INTEGER DEFAULT 100
-);
-CREATE TABLE audit_log (
-  id TEXT PRIMARY KEY, project_id TEXT, action TEXT NOT NULL, key TEXT, mode TEXT,
-  context_json TEXT, created_at TEXT NOT NULL
-);
-```
+A broker handling plaintext values or credentials remains a sensitive system.
+Avoiding persistent value storage reduces duplication; it does not mean the
+broker cannot access or leak secrets.
 
-`enc_key_id` / `enc_alg` are the envelope metadata the v0.1 schema was missing.
+Planned capabilities include user/team/project management, scoped CI identity,
+RBAC, central audit, and references to Knox, AWS Secrets Manager/SSM, 1Password,
+Vault, and other managers. Provider support is incremental, not implied by this
+list. Proposed server stack: Node/TypeScript with Fastify or Hono, a REST API,
+and a database suited to the deployment. These are unimplemented choices.
 
----
+Provider code has access to secrets. A reviewed first-party integration is the
+initial direction; signed/distributed plugins and declared permissions need a
+separate design before an open plugin ecosystem is offered.
 
-## 14. Server (V1) — broker-first
+## 10. Roadmap and acceptance
 
-Default posture: **store references + ACLs + audit, fetch from external managers**
-(ADR-0001). Optional encrypted storage only for teams without an existing manager.
-Capabilities: user/team/project management, access policies, audit logs, API /
-machine / CI tokens. Stack: Node/TypeScript, Fastify or Hono, Drizzle, SQLite
-(small) → Postgres (production), REST first, UI later.
+**Local correctness and remote integration follow-up:** consistent mode handling,
+portable generated paths, safer export handling, and testing additional Knox
+platform/authentication configurations.
 
-Borrow from Knox where it fits the broker model: ACL roles (`Admin/Write/Read/None`)
-over principals (user, machine, machine-prefix, service); mTLS for machines and
-OAuth for users.
+**Team release:** authenticated broker, login/link, RBAC, enforceable remote-only
+production policy, central audit, and additional tested providers.
 
----
+**Later options:** web UI, version history, approvals, CI/container integration,
+completions, application-aware file refresh, policy as code, hosted service,
+SSO/SAML/SCIM, MFA, dynamic credentials, and a Kubernetes agent.
 
-## 15. Policy System (V1)
+Each capability needs configuration documentation, error behavior, tests, and a
+clear security boundary before moving to the implemented list. A file-refresh
+agent must not be marketed as live environment-variable rotation.
 
-```json
-{
-  "policies": [{
-    "name": "no-prod-on-personal",
-    "allow": { "modes": ["local","dev"], "networks": ["home","corp-vpn"] },
-    "deny":  { "modes": ["prod"] }
-  }]
-}
+Success measures remain installation-to-first-run time, verified migrations
+away from plaintext files, successful scoped launches, and (when implemented)
+remote onboarding, audit coverage, and access-policy enforcement.
+
+## 11. Repository structure
+
+```text
+src/
+  cli/          commands/       config/       context/
+  core/         crypto/         modes/        providers/       util/
+  index.ts      types.ts
+docs/
+  assets/       adr/            providers/
+  PRD.md        usage.md        configuration.md             security.md
 ```
 
-Use cases: keep prod off unknown networks and personal machines, scope CI tokens
-to CI, bind local secrets to matching repos, require MFA for sensitive modes
-(later).
-
----
-
-## 16. MVP (v0.1) — five commands + import
-
-> Proves exactly one thing: *a developer runs a command with secrets resolved at
-> runtime, with no committed and no plaintext `.env` in the repo.*
-
-**In:** `init` · `set`/`list`/`remove` · `import .env` · `noenv -- <cmd>` ·
-explicit `--mode` + `--dry-run` · local SQLite with **real** OS-keychain-backed
-encryption.
-
-**Out (deferred):** schema/validation, dotenv export, `doctor`, network/IP rules,
-git-branch rules, TS-type/doc generation, server.
-
-`import` ships in MVP precisely because every adopter already has `.env` files; a
-one-command migration is what makes adoption real.
-
----
-
-## 17. Roadmap
-
-- **V1 (teams):** broker server, `login`, link/RBAC, remote resolution, audit
-  logs, opt-in branch & network rules, schema docs, provider plugin API +
-  AWS Secrets Manager + 1Password, CI mode.
-- **V1.5:** web UI, version history, approval flows, GitHub Actions / Docker
-  integration, shell completions, policy-as-code, **optional daemon/file-watch
-  mode for live rotation** (ADR-0002).
-- **V2:** hosted cloud, org management, SSO/SAML/SCIM, fine-grained RBAC, MFA,
-  dynamic/leased credentials, k8s agent, AI-agent-safe injection.
-
----
-
-## 18. Success Metrics
-
-- **Adoption:** install→first successful `noenv --` under 5 min; # projects init'd;
-  # commands run; # `.env` files imported & deleted.
-- **Security:** reduction in committed `.env` files; reduction in plaintext local
-  secret files; # risky exports warned/blocked; audit coverage of resolutions.
-- **Team:** # projects linked; users/project; provider integrations configured;
-  successful CI runs.
-
----
-
-## 19. Decided (formerly "open questions")
-
-| # | Question | Decision |
-|---|---|---|
-| 1 | Package name | `@noenv/cli`, bin `noenv`. No "snow". |
-| 2 | Schema format | JSON Schema-compatible JSON. |
-| 3 | Local store | SQLite **and** OS keychain (keychain holds master key). |
-| 4 | Prod secrets locally? | **Never.** Brokered from remote only. |
-| 5 | Network/IP resolution | Opt-in, off by default, prints resolved mode. |
-| 6 | `--` vs `run` | `noenv -- <cmd>` primary; `noenv run -- <cmd>` alias; bare = error. |
-| 7 | Committed references | Yes — references/pointers only, never ciphertext. |
-| 8 | Server store vs broker | **Broker-first**, optional storage (ADR-0001). |
-| 9 | Commit schemas | Yes (post-MVP); they're docs, no secrets. |
-| 10 | Temp `.env` gating | Not `--unsafe`; default stdout + auto-gitignore + auto-cleanup + warning. |
-
----
-
-## 20. Positioning
-
-> `.env` files were a useful convention, but they were never a security boundary.
-> NoEnv keeps the convenience of environment variables while removing the habit of
-> storing and committing them — and is honest about the line between "fewer
-> leaked files" and "runtime secret protection."
-
----
-
-## 21. Repository Structure
-
-```
-noenv/
-  packages/
-    cli/            core/            schema/
-    providers/      local-sqlite/  noenv-server/  aws-secrets-manager/  onepassword/
-  apps/             server/        web/
-  examples/         node-express/  python-fastapi/  docker-compose/
-  docs/             PRD.md         adr/
-```
+`scripts/test-knox-live.mjs` exercises a configured Knox deployment using a
+disposable fixture. Tests live beside their modules as `*.test.ts`. `npm test` builds the package
+and runs Node's test runner in `dist/`; `npm run typecheck` checks types without
+emitting. There is no current monorepo, server app, or web app.

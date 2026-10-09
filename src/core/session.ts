@@ -3,6 +3,7 @@ import type { GlobalConfig, NoEnvConfig, NoEnvContext } from "../types.js";
 import { loadGlobalConfig, DEFAULT_DB_PATH } from "../config/config.js";
 import { createKeyProvider } from "../crypto/keyprovider.js";
 import { createCipher, ENC_ALG, type Cipher } from "../crypto/envelope.js";
+import { KnoxProvider } from "../providers/knox.js";
 import { LocalSqliteProvider } from "../providers/local-sqlite.js";
 import type { SecretProvider } from "../providers/types.js";
 import { password } from "../cli/prompt.js";
@@ -10,8 +11,9 @@ import { password } from "../cli/prompt.js";
 /** Known plaintext encrypted at init to validate a passphrase later. */
 export const VERIFIER_PLAINTEXT = "noenv-verifier-v1";
 
-export function requireGlobal(): GlobalConfig {
+export function requireGlobal(config?: NoEnvConfig | null): GlobalConfig | null {
   const g = loadGlobalConfig();
+  if (!g && config?.providers?.length && config.providers.every((pc) => pc.type === "knox")) return null;
   if (!g) throw new Error("NoEnv is not initialized here. Run `noenv init` first.");
   return g;
 }
@@ -38,21 +40,29 @@ export async function getCipher(global: GlobalConfig): Promise<Cipher> {
 
 export async function buildProviders(
   config: NoEnvConfig | null,
-  global: GlobalConfig,
+  global: GlobalConfig | null,
 ): Promise<SecretProvider[]> {
-  const cipher = await getCipher(global);
-  const dbPath = global.dbPath ?? DEFAULT_DB_PATH;
+  const dbPath = global?.dbPath ?? DEFAULT_DB_PATH;
   const providerConfigs = config?.providers ?? [{ name: "local", type: "sqlite", path: dbPath }];
-
   const providers: SecretProvider[] = [];
-  for (const pc of providerConfigs) {
-    if (pc.type === "sqlite") {
-      providers.push(new LocalSqliteProvider(pc.name, pc.path ?? dbPath, cipher));
-    } else {
-      throw new Error(`unknown provider type "${pc.type}" (only "sqlite" is supported in v0.1)`);
+  let cipher: Cipher | undefined;
+  try {
+    for (const pc of providerConfigs) {
+      if (pc.type === "sqlite") {
+        if (!global) throw new Error("Local SQLite requires initialization; run `noenv init` first.");
+        cipher ??= await getCipher(global);
+        providers.push(new LocalSqliteProvider(pc.name, pc.path ?? dbPath, cipher));
+      } else if (pc.type === "knox") {
+        providers.push(new KnoxProvider(pc));
+      } else {
+        throw new Error(`unknown provider type "${pc.type}" (supported: "sqlite", "knox")`);
+      }
     }
+    return providers;
+  } catch (error) {
+    providers.forEach((provider) => provider.close());
+    throw error;
   }
-  return providers;
 }
 
 /** The first writable provider, for set/remove/import operations. */

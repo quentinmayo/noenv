@@ -17,8 +17,8 @@ export async function run(p: ParsedCommand): Promise<number> {
     return 1;
   }
 
-  const global = requireGlobal();
   const config = loadProjectConfig()?.config ?? null;
+  const global = requireGlobal(config);
   const context = buildContext();
   const project = resolveProjectName({ flag: strOpt(p, "project"), config, context });
   const mode = strOpt(p, "mode") ?? config?.defaultMode ?? "local";

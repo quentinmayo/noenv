@@ -40,8 +40,8 @@ function loadSchema(): Schema | null {
 }
 
 async function resolveVars(p: ParsedCommand): Promise<Record<string, string>> {
-  const global = requireGlobal();
   const config = loadProjectConfig()?.config ?? null;
+  const global = requireGlobal(config);
   const context = buildContext();
   const project = resolveProjectName({ flag: strOpt(p, "project"), config, context });
   const mode = strOpt(p, "mode") ?? config?.defaultMode ?? "local";
@@ -108,7 +108,7 @@ export async function run(p: ParsedCommand): Promise<number> {
         continue;
       }
       if (present && v.type === "number" && Number.isNaN(Number(vars[key]))) {
-        log.error(`${key} should be a number, got "${vars[key]}"`);
+        log.error(`${key} should be a number [value redacted]`);
         problems++;
       }
     }

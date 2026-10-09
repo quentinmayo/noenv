@@ -1,3 +1,4 @@
+import { applicationEnvironment } from "../util/environment.js";
 import fs from "node:fs";
 import path from "node:path";
 import type { ParsedCommand } from "../cli/parse.js";
@@ -12,8 +13,8 @@ import { spawnChild } from "../util/spawn.js";
 import type { SecretValue } from "../types.js";
 
 async function resolveVars(p: ParsedCommand): Promise<Record<string, string>> {
-  const global = requireGlobal();
   const config = loadProjectConfig()?.config ?? null;
+  const global = requireGlobal(config);
   const context = buildContext();
   const project = resolveProjectName({ flag: strOpt(p, "project"), config, context });
   const mode = strOpt(p, "mode") ?? config?.defaultMode ?? "local";
@@ -66,7 +67,7 @@ export async function run(p: ParsedCommand): Promise<number> {
     fs.writeFileSync(target, toDotenv(vars), { mode: 0o600 });
     log.warn(`Wrote temporary .env (${Object.keys(vars).length} vars). It will be deleted after the command exits.`);
     try {
-      return await spawnChild(child, process.env);
+      return await spawnChild(child, applicationEnvironment());
     } finally {
       try {
         fs.unlinkSync(target);

@@ -5,7 +5,7 @@ import type { ParsedCommand } from "../cli/parse.js";
 import { log } from "../cli/output.js";
 import { loadGlobalConfig, loadProjectConfig, DEFAULT_DB_PATH } from "../config/config.js";
 import { keychainAvailable } from "../crypto/keyprovider.js";
-import { getCipher } from "../core/session.js";
+import { buildProviders, getCipher } from "../core/session.js";
 
 interface Check {
   name: string;
@@ -33,10 +33,12 @@ export async function run(_p: ParsedCommand): Promise<number> {
   });
 
   const global = loadGlobalConfig();
+  const proj = loadProjectConfig();
+  const remoteOnly = Boolean(proj?.config.providers?.length && proj.config.providers.every((pc) => pc.type === "knox"));
   checks.push({
     name: "NoEnv initialized",
-    ok: global ? true : false,
-    detail: global ? `key custody: ${global.keyProvider}` : "run `noenv init`",
+    ok: remoteOnly || Boolean(global),
+    detail: remoteOnly ? "Knox-only configuration; no local key required" : global ? `key custody: ${global.keyProvider}` : "run `noenv init`",
   });
 
   const kc = await keychainAvailable();
@@ -46,7 +48,6 @@ export async function run(_p: ParsedCommand): Promise<number> {
     detail: kc ? undefined : "not available; passphrase fallback in use if configured",
   });
 
-  const proj = loadProjectConfig();
   checks.push({
     name: "project config",
     ok: proj ? true : "warn",
@@ -65,7 +66,17 @@ export async function run(_p: ParsedCommand): Promise<number> {
     detail: gi.includes(".env") ? undefined : "add `.env` to .gitignore",
   });
 
-  if (global) {
+  if (remoteOnly && proj) {
+    try {
+      const providers = await buildProviders(proj.config, null);
+      providers.forEach((provider) => provider.close());
+      checks.push({ name: "Knox configuration", ok: true, detail: "valid; run a mapped get/run to verify live access" });
+    } catch (error) {
+      checks.push({ name: "Knox configuration", ok: false, detail: (error as Error).message });
+    }
+  }
+
+  if (global && !remoteOnly) {
     try {
       const cipher = await getCipher(global);
       const roundTrip = cipher.decrypt(cipher.encrypt("noenv-doctor"));

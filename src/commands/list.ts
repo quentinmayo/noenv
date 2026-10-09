@@ -7,8 +7,8 @@ import { requireGlobal, buildProviders, resolveProjectName } from "../core/sessi
 import type { SecretMetadata } from "../types.js";
 
 export async function run(p: ParsedCommand): Promise<number> {
-  const global = requireGlobal();
   const config = loadProjectConfig()?.config ?? null;
+  const global = requireGlobal(config);
   const context = buildContext();
   const project = resolveProjectName({ flag: strOpt(p, "project"), config, context });
   const mode = strOpt(p, "mode") ?? config?.defaultMode ?? "local";

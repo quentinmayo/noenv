@@ -1,79 +1,84 @@
 # ADR-0001 — Storage model: broker vs. store
 
-- **Status:** Proposed
+- **Status:** Proposed for the team server; local SQLite is implemented
 - **Date:** 2026-05-27
+- **Clarified:** 2026-10-09
 - **Deciders:** Quentin Mayo
-- **Related:** [PRD §3, §10, §14](../PRD.md) · [ADR-0002](./0002-delivery-model-launch-time-vs-daemon.md)
+- **Related:** [PRD](../PRD.md) · [ADR-0002](0002-delivery-model-launch-time-vs-daemon.md) · [Knox provider](../providers/knox.md)
 
 ## Context
 
-The NoEnv server (V1) can take one of two postures toward secret values:
+The proposed NoEnv team server can take two approaches:
 
-1. **Store** — the server holds the actual secret bytes (encrypted at rest) and
-   serves them to authenticated clients. This is what Pinterest's Knox does: a
-   central service stores keys/secrets, versions them, encrypts at rest via a
-   "cryptor" wrapping a master key, and serves them over mTLS/OAuth with ACLs.
-2. **Broker** — the server holds only *references* (provider + path + version),
-   ACLs, and audit logs. The actual values live in an external manager (AWS
-   Secrets Manager, SSM, 1Password, Vault, Doppler, GCP/Azure). The server
-   brokers access and records who fetched what; it never possesses the secret.
+1. **Store:** hold encrypted secret values and serve them to authenticated
+   clients. This requires key custody, recovery, rotation, and access controls.
+2. **Broker:** persist references, ACLs, and audit metadata, and fetch values
+   from an external secret manager when authorized clients request them.
 
-Knox works as a store because Pinterest operates it with a hardware/KMS-backed
-master key and a dedicated SRE/security team. A small team adopting NoEnv has
-neither. A server that stores real secrets becomes a high-value attack target and
-drags in compliance obligations (key custody, encryption audits, breach scope)
-that most early adopters cannot meet.
+A broker can still handle plaintext in memory and possess upstream credentials.
+It reduces persistent copies but is not outside the secret trust boundary.
+A compromised broker may use its credentials to retrieve upstream values.
 
-The product also has a hard rule (PRD §10.1): **prod secrets are never stored in
-the local provider** — they must come from a remote source with audit. That rule
-is far easier to honor if the remote source is a broker in front of a real
-manager than if NoEnv becomes yet another place prod secrets live.
+The checkout supports encrypted local SQLite and read-only Knox. SQLite accepts any
+mode name, including production, and does not enforce remote-only production
+policy. The desired policy must be implemented before it becomes a guarantee.
 
-The user has also asked that NoEnv "be verbose enough to support different
-options" — i.e., not force a single storage philosophy on every team.
+## Proposed decision
 
-## Decision
+**Broker-first, store-optional** for a future NoEnv server.
 
-**Broker-first, store-optional.**
+- Prefer references to an existing manager, resolving values at request time
+  without persisting the values in the broker database.
+- Permit optional encrypted server storage for teams without an external
+  manager, with explicit key custody and recovery requirements. KMS/HSM-backed
+  envelope encryption is a proposed server design, not current local behavior.
+- Expose compatible provider reads to the CLI. Provider construction,
+  authentication, and diagnostics still need implementation per provider.
+- Keep the local encrypted store for standalone development. Introduce
+  enforceable remote-only policy for production-tagged scopes in the team
+  release; mode names and confirmation prompts alone do not enforce it.
 
-- The default and recommended server posture is **broker**: store references,
-  ACLs, and audit; resolve values from external managers at request time; never
-  persist the secret value.
-- The server **also** supports an **optional encrypted store** mode for teams
-  that have no external manager and explicitly opt in. When enabled it uses
-  envelope encryption with a master key in a KMS/HSM (or, for self-host, a
-  documented key-custody setup) — never an application-config secret.
-- The choice is per-project configuration, not a global build-time fork. Both
-  modes expose the same provider interface to the CLI, so clients don't care
-  which is in use.
-- Local mode (solo) is always a store (encrypted SQLite, OS-keychain master key),
-  but is **forbidden from holding prod-tagged secrets**.
+## Knox compatibility
+
+Knox can be an upstream provider without changing this storage direction.
+NoEnv can read an existing deployment directly through a read-only client
+adapter; that does not require NoEnv to become a server or secret store.
+The [Knox provider](../providers/knox.md) documents the implemented adapter and
+links to the verified upstream client behavior.
+
+Adopting Knox as an upstream and building a new Knox-style storage server are
+separate choices. NoEnv's adapter would rely on the deployment's authentication,
+ACLs, and operational controls, while retaining launch-time injection.
 
 ## Consequences
 
-**Positive**
-- Smallest attack surface and compliance burden by default; a server breach in
-  broker mode leaks references and audit logs, not secrets.
-- Honors "no prod secrets on laptops / in NoEnv" cleanly.
-- Meets the "support different options" requirement: teams with an existing
-  manager get broker; teams without get optional storage; solo devs get local.
-- Same provider interface everywhere keeps the CLI simple.
+**Benefits**
 
-**Negative / costs**
-- Broker mode depends on the availability and latency of the upstream manager.
-- Two code paths (broker, optional-store) to build and test, plus the local store.
-- Optional-store mode still requires a real key-custody story; it must not become
-  the easy default, or we recreate the problem this ADR avoids.
+- Teams with an existing manager can reuse its secret lifecycle.
+- Broker storage can contain references and audit rather than another durable
+  copy of every value.
+- Standalone local use and a future optional server store remain possible.
 
-**Mitigations**
-- Ship broker + at least one upstream (AWS Secrets Manager) before optional-store.
-- Cache references and short-TTL resolved values in the client only as allowed by
-  policy; never persist on disk by default.
-- Make optional-store mode loud about its key-custody requirements at enable time.
+**Costs and limits**
+
+- Remote resolution depends on upstream availability and latency.
+- Broker credentials and in-memory values remain sensitive.
+- Additional storage modes add distinct key-custody and recovery work.
+- References and audit metadata can themselves reveal sensitive structure.
+- The CLI still receives plaintext; remote sourcing is not a local-process sandbox.
+
+**Implementation direction**
+
+Ship a tested read-only upstream adapter before building optional server storage.
+Use bounded requests, least-privilege identity, and explicit failure semantics.
+Do not introduce persistent client value caching by default. Authentication,
+central audit, and production policy must be tested and documented separately.
 
 ## Alternatives considered
 
-- **Store-only (Knox-style):** rejected as a default — wrong risk/operational
-  profile for NoEnv's early audience; keeps prod secrets in NoEnv.
-- **Broker-only:** rejected as too rigid — excludes teams with no existing
-  manager, violating the "support different options" requirement.
+- **Store-only server:** requires every adopter to operate another secret store;
+  not the proposed default.
+- **Broker-only forever:** excludes teams that cannot use an external manager;
+  retain optional storage as a future choice.
+- **Require a NoEnv server for Knox:** unnecessary for initial read-only
+  integration; a direct client adapter is sufficient.

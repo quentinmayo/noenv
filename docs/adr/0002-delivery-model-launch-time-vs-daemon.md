@@ -1,79 +1,78 @@
 # ADR-0002 — Delivery model: launch-time injection vs. daemon
 
-- **Status:** Proposed
+- **Status:** Launch-time model implemented; daemon/file refresh remains proposed
 - **Date:** 2026-05-27
+- **Clarified:** 2026-10-09
 - **Deciders:** Quentin Mayo
-- **Related:** [PRD §3, §6.3](../PRD.md) · [ADR-0001](./0001-storage-model-broker-vs-store.md)
+- **Related:** [PRD](../PRD.md) · [ADR-0001](0001-storage-model-broker-vs-store.md) · [Knox provider](../providers/knox.md)
 
 ## Context
 
-NoEnv must get resolved secrets into the target process. Two delivery models:
+NoEnv must deliver resolved values to an application. Two models have different
+application and operational requirements:
 
-1. **Launch-time injection** — resolve at spawn, set the child process's
-   environment, run, preserve exit code, stream stdio. Simple, no background
-   process, "just a wrapper."
-2. **Daemon / file-watch** — a long-running agent caches secrets (typically to a
-   tmpfs file the app reads/watches) and refreshes them on a timer and on
-   rotation. This is Pinterest Knox's model: a client daemon registers needed
-   keys, writes their contents to a local directory, and keeps them current so
-   apps pick up rotations without restarting.
+1. **Launch-time injection:** resolve values before spawning, merge them into
+   the child environment, inherit stdio, and preserve normal exit codes.
+2. **Daemon/file refresh:** a background process updates files or serves an API;
+   the application must read or reload those values to observe rotation.
 
-The two models differ on one property that the v0.1 PRD glossed over:
-**environment variables are immutable for the life of a process.** Once `npm run
-dev` is spawned with `DATABASE_URL` in its environment, nothing — not NoEnv, not
-the OS — can change that value in the running process. So launch-time injection
-**cannot** deliver live rotation; only a file/watch (daemon) model can.
+An application can change its own environment. The limitation relevant here is
+that an external wrapper cannot ordinarily update the environment of an already
+running child. A background process alone cannot make a startup-only application
+observe new values. File refresh, an SDK, or a coordinated restart would require
+an explicit integration.
 
-The v0.1 draft listed both "runtime env injection" and "secret rotation
-concepts" as goals, and even a "clears values when process exits" step — which is
-a no-op, since env vars are already gone when a process dies. These are in
-tension and must be resolved, not both promised.
+Knox supports client-side cached files and daemon workflows, but its CLI also
+supports direct network reads. Using Knox as a provider therefore does not
+require NoEnv to adopt a daemon. See the source references in the
+[Knox provider](../providers/knox.md).
 
-There is also a security trade: the daemon model writes secrets to a file (even
-tmpfs), reintroducing an at-rest, app-readable artifact — exactly the kind of
-thing NoEnv exists to avoid. Launch-time injection keeps secrets to process
-memory and never touches disk.
+## Decision and current behavior
 
-## Decision
+**Launch-time injection is the default and current implementation.**
 
-**Launch-time injection is the default and the only model in MVP/V1.**
+- `noenv -- <command>` resolves values, overlays them on the inherited
+  environment, and launches the child. It does not create a plaintext secret file.
+- Rotation takes effect on the next resolution and launch. Running processes
+  are not refreshed by NoEnv.
+- The parent shell's environment is unchanged. Child processes may pass values
+  to descendants or write them to logs/files; NoEnv does not control that.
+- `--dry-run` still resolves/decrypts values but does not launch the command.
+- There is no daemon, background refresh, or automatic restart facility.
 
-- `noenv -- <cmd>` resolves at spawn and injects into the child environment.
-  Nothing is written to disk; no daemon runs.
-- **Rotation semantics are "next run":** rotating a secret takes effect the next
-  time the command is launched. NoEnv does not push rotations into live
-  processes, and the PRD/README say so plainly. The misleading "clears values on
-  exit" step is removed.
-- A **daemon / file-watch mode is a documented future option (V1.5+)**, opt-in
-  per project, for the narrow set of users who genuinely need live rotation into
-  long-running local processes. It is never the default and comes with an
-  explicit note that it writes secrets to a (tmpfs) file.
-- The legacy bridge (`noenv export --temporary -- <cmd>`) covers tools that
-  *require* a real `.env` file: write temp file, run, auto-delete. This is a
-  file-based escape hatch, not the daemon.
+The legacy `export --temporary -- <command>` bridge writes `.env` in cwd and
+attempts deletion after the command exits. The application must read that file
+itself. It is not a refresh mechanism. Forced termination can leave the file
+behind, and `--force` overwrites then deletes an existing file rather than
+restoring it. Details are in [usage](../usage.md).
+
+## Proposed future option
+
+A daemon or file/API-based delivery mode may be useful for applications that
+explicitly support reload. It would be opt-in, with documented file permissions,
+cache lifetime, revocation/failure behavior, and application integration. If a
+memory-backed filesystem is required, support must be verified per platform;
+that is not a current NoEnv feature.
 
 ## Consequences
 
-**Positive**
-- Keeps NoEnv "a wrapper, not a platform" — no background process to install,
-  supervise, or secure.
-- Secrets stay in process memory; no new at-rest artifact in the default path.
-- Honest, simple mental model: "the value you get is the value at launch."
-- Leaves room to add the daemon later for the users who truly need it, without
-  blocking v1 or compromising the default.
+**Benefits**
 
-**Negative / costs**
-- No live rotation in the default model; long-running dev servers must be
-  restarted to pick up a rotated secret. Acceptable for local dev; documented.
-- If/when the daemon ships, it adds a meaningfully different security profile
-  (file at rest, refresh logic, supervision) that must be gated and well
-  documented.
+- Ordinary commands work without an SDK or background service.
+- Default delivery does not create plaintext files.
+- The lifecycle is explicit: restart to resolve updated values.
+- Remote providers, including the Knox adapter, can use the same model.
+
+**Costs and limits**
+
+- Long-running applications retain their launch-time values.
+- Secrets remain visible within the application/runtime security boundary.
+- Legacy file export has a different exposure and cleanup profile.
+- Future file refresh requires application cooperation and additional supervision.
 
 ## Alternatives considered
 
-- **Daemon-first (Knox-style):** rejected for v1 — contradicts "just a wrapper,"
-  reintroduces secrets-on-disk by default, and is far more to build/operate than
-  the core thesis needs.
-- **Promise both equally (v0.1 framing):** rejected — env immutability makes
-  "inject at runtime" and "live rotation" mutually exclusive in one model;
-  promising both erodes trust.
+- **Daemon first:** adds operational work and application integration before
+  proving the core command-wrapper workflow.
+- **Promise live env rotation:** cannot be delivered by an external wrapper to
+  arbitrary running commands; offer explicit restart or reload semantics instead.
