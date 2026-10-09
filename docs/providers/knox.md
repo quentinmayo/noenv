@@ -1,5 +1,8 @@
 # Pinterest Knox provider
 
+Integrates with **[Pinterest Knox](https://github.com/pinterest/knox)**, the
+open-source secret management service.
+
 **Status: implemented in this checkout; live-tested on 2026-10-09.** The
 read-only adapter uses an installed, deployment-configured Knox CLI. It fetches
 values at launch with `knox get -n`, without copying them to NoEnv's SQLite store.
